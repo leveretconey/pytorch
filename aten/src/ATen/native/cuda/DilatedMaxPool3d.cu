@@ -223,6 +223,8 @@ __global__ static void max_pool3d_with_indices_backward_single_out_frame(
     }
     int64_t maxIndex = indicesData[out_index];
     if (maxIndex != -1) {
+      CUDA_KERNEL_ASSERT(
+          maxIndex >= 0 && maxIndex < (int64_t)itime * iheight * iwidth);
       if (!channels_last) {
         gpuAtomicAddNoReturn(&gradInputData[slice * itime  * iheight * iwidth + maxIndex],
           gradOutputData[out_index]);

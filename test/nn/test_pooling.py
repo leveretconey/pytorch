@@ -1446,6 +1446,51 @@ torch.cuda.synchronize()
             torch.channels_last,
         )
 
+    @onlyCUDA
+    def test_max_pool3d_backward_invalid_indices(self, device):
+        # Regression test for https://github.com/pytorch/pytorch/issues/193104
+        # Run in a separate process because CUDA device-side asserts are not recoverable.
+        stderr = TestCase.runWithPytorchAPIUsageStderr(f"""\
+#!/usr/bin/env python3
+
+import torch
+import torch.nn.functional as F
+from torch.testing._internal.common_utils import (run_tests, TestCase)
+
+class TestThatContainsCUDAAssert(TestCase):
+    def test_max_pool3d_backward_invalid_indices(self):
+        device = '{str(device)}'
+        input_tensor = torch.ones(
+            (1, 1, 2, 4, 6),
+            dtype=torch.float32,
+            device=device,
+            requires_grad=True,
+        )
+        output, indices = F.max_pool3d(
+            input_tensor,
+            kernel_size=2,
+            stride=2,
+            return_indices=True,
+        )
+        indices_alias = torch.from_dlpack(indices)
+        torch.cuda.synchronize()
+        indices_alias.fill_(2**32)
+        torch.cuda.synchronize()
+        output.sum().backward()
+        torch.cuda.synchronize()
+
+if __name__ == '__main__':
+    run_tests()
+        """)
+        has_cuda_assert = "CUDA error: device-side assert triggered" in stderr
+        has_hip_assert = (
+            "launch failure" in stderr or "HSA_STATUS_ERROR_EXCEPTION" in stderr
+        )
+        self.assertTrue(
+            has_cuda_assert or has_hip_assert,
+            lambda msg: f"{msg}\nExpected device assert error in stderr, got: {stderr}",
+        )
+
     @expectedFailureMPS  # TODO: Fixme
     @dtypes(torch.half, torch.bfloat16, torch.float, torch.double)
     @dtypesIfCUDA(torch.half, torch.float, torch.double)

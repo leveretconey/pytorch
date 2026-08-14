@@ -12419,6 +12419,39 @@ if __name__ == '__main__':
                         lambda msg: f"{msg}\nExpected device assert error in stderr, got: {stderr}")
 
 
+    @onlyCUDA
+    def test_multi_margin_loss_backward_invalid_target_index(self, device):
+        # Regression test for https://github.com/pytorch/pytorch/issues/193102
+        # Run in a separate process because CUDA device-side asserts are not recoverable.
+        stderr = TestCase.runWithPytorchAPIUsageStderr(f"""\
+#!/usr/bin/env python3
+
+import torch
+import torch.nn.functional as F
+from torch.testing._internal.common_utils import (run_tests, TestCase)
+
+class TestThatContainsCUDAAssert(TestCase):
+    def test_multi_margin_loss_backward_invalid_target_index(self):
+        device = '{str(device)}'
+        x = torch.ones((1024,), dtype=torch.float32, device=device, requires_grad=True)
+        target = torch.tensor(0, dtype=torch.int64, device=device)
+        target_alias = torch.from_dlpack(target)
+        loss = F.multi_margin_loss(x, target, p=1, margin=0.1, reduction='mean')
+        torch.cuda.synchronize()
+        target_alias.fill_(2147483647)
+        torch.cuda.synchronize()
+        loss.backward()
+        torch.cuda.synchronize()
+
+if __name__ == '__main__':
+    run_tests()
+        """)
+        has_cuda_assert = 'CUDA error: device-side assert triggered' in stderr
+        has_hip_assert = ('launch failure' in stderr
+                          or 'HSA_STATUS_ERROR_EXCEPTION' in stderr)
+        self.assertTrue(has_cuda_assert or has_hip_assert,
+                        lambda msg: f"{msg}\nExpected device assert error in stderr, got: {stderr}")
+
 
     def test_cross_entropy_loss_prob_target_all_reductions(self, device):
         # Test with k-dimensional loss.
