@@ -19,6 +19,7 @@
 #endif
 
 #include <ATen/native/AdaptivePooling.h>
+#include <ATen/native/CanUse32BitIndexMath.h>
 
 #include <algorithm>
 #include <cfloat>
@@ -48,57 +49,57 @@ __device__ inline int64_t end_index(int64_t a, int64_t b, int64_t c) {
  *    gridDim.y blocks work together on a single 2D output plane specified by
  *    (blockIdx.x + offsetZ).
  */
-template <typename scalar_t, typename accscalar_t>
+template <typename scalar_t, typename accscalar_t, typename index_t>
 __global__ void adaptiveaveragepool(
     const scalar_t *input, scalar_t *output,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW,
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW,
     int64_t sizeD, int64_t istrideB, int64_t istrideD,
     int64_t istrideT, int64_t istrideH, int64_t istrideW,
     int64_t offsetZ) {
   // iterates on output pixels
-  int ot, oh, ow;
+  index_t ot, oh, ow;
 
   // compute offsets based on thread/block ID
-  int ostartH = blockIdx.y * blockDim.y + threadIdx.y;
-  int oendH = osizeH;
-  int ostepH = gridDim.y * blockDim.y;
-  int ostartW = threadIdx.x;
-  int oendW = osizeW;
-  int ostepW = blockDim.x;
+  index_t ostartH = blockIdx.y * blockDim.y + threadIdx.y;
+  index_t oendH = osizeH;
+  index_t ostepH = gridDim.y * blockDim.y;
+  index_t ostartW = threadIdx.x;
+  index_t oendW = osizeW;
+  index_t ostepW = blockDim.x;
 
   // select output plane
-  int64_t o_plane = blockIdx.x + offsetZ;
+  index_t o_plane = static_cast<index_t>(blockIdx.x + offsetZ);
   ot = o_plane % osizeT; // output frame/time
-  int d = o_plane / osizeT; // flattened (batch, channel) index
+  index_t d = o_plane / osizeT; // flattened (batch, channel) index
 
   // Decompose d into batch and channel indices
-  int batch_idx = d / sizeD;
-  int channel_idx = d % sizeD;
+  index_t batch_idx = d / sizeD;
+  index_t channel_idx = d % sizeD;
 
   // input frame/time range is fixed.
-  int istartT = start_index(ot, osizeT, isizeT);
-  int iendT = end_index(ot, osizeT, isizeT);
-  int kT = iendT - istartT;
+  index_t istartT = start_index(ot, osizeT, isizeT);
+  index_t iendT = end_index(ot, osizeT, isizeT);
+  index_t kT = iendT - istartT;
 
   // output offset by slice/feature and frame/time
   scalar_t *output_dt = output + o_plane*osizeH*osizeW;
 
   // For all output pixels...
   for (oh = ostartH; oh < oendH; oh += ostepH) {
-    int istartH = start_index(oh, osizeH, isizeH);
-    int iendH = end_index(oh, osizeH, isizeH);
-    int kH = iendH - istartH;
+    index_t istartH = start_index(oh, osizeH, isizeH);
+    index_t iendH = end_index(oh, osizeH, isizeH);
+    index_t kH = iendH - istartH;
 
     for (ow = ostartW; ow < oendW; ow += ostepW) {
-      int istartW = start_index(ow, osizeW, isizeW);
-      int iendW = end_index(ow, osizeW, isizeW);
-      int kW = iendW - istartW;
+      index_t istartW = start_index(ow, osizeW, isizeW);
+      index_t iendW = end_index(ow, osizeW, isizeW);
+      index_t kW = iendW - istartW;
 
       scalar_t *ptr_output = output_dt + oh*osizeW + ow;
       accscalar_t sum = static_cast<accscalar_t>(0);
 
-      int it, ih, iw;
+      index_t it, ih, iw;
       for (it = 0; it < kT; ++it) {
         for (ih = 0; ih < kH; ++ih) {
           for (iw = 0; iw < kW; ++iw) {
@@ -117,12 +118,12 @@ __global__ void adaptiveaveragepool(
   }
 }
 
-template <typename scalar_t, typename accscalar_t>
+template <typename scalar_t, typename accscalar_t, typename index_t>
 void adaptiveaveragepool_loop(
     const scalar_t *input_data, scalar_t *output_data,
     int64_t totalZ,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW,
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW,
     int64_t sizeD, int64_t istrideB, int64_t istrideD, int64_t istrideT, int64_t istrideH, int64_t istrideW) {
   int64_t offsetZ = 0;
   dim3 threads(32, 8);
@@ -130,7 +131,7 @@ void adaptiveaveragepool_loop(
   int blocksH = std::max((int)(16L / totalZ), 1);
   while (totalZ > 0) {
     dim3 blocks(totalZ > 65535 ? 65535 : totalZ, blocksH);
-    adaptiveaveragepool<scalar_t, accscalar_t>
+    adaptiveaveragepool<scalar_t, accscalar_t, index_t>
       <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         input_data, output_data,
         isizeT, isizeH, isizeW,
@@ -151,32 +152,32 @@ void adaptiveaveragepool_loop(
  *    gridDim.y blocks work together on a single 2D output plane specified by
  *    (blockIdx.x + offsetZ).
  */
-template <typename scalar_t, typename accscalar_t>
+template <typename scalar_t, typename accscalar_t, typename index_t>
 __global__ void adaptiveaveragegradinput(
     scalar_t *gradInput, const scalar_t *gradOutput,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW,
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW,
     int64_t offsetZ)
 {
   // iterators on input pixels
-  int it, ih, iw;
+  index_t it, ih, iw;
 
   // compute offsets based on thread/block ID
-  int istartH = blockIdx.y * blockDim.y + threadIdx.y;
-  int iendH = isizeH;
-  int istepH = gridDim.y * blockDim.y;
-  int istartW = threadIdx.x;
-  int iendW = isizeW;
-  int istepW = blockDim.x;
+  index_t istartH = blockIdx.y * blockDim.y + threadIdx.y;
+  index_t iendH = isizeH;
+  index_t istepH = gridDim.y * blockDim.y;
+  index_t istartW = threadIdx.x;
+  index_t iendW = isizeW;
+  index_t istepW = blockDim.x;
 
   // select input plane
-  int64_t i_plane = blockIdx.x + offsetZ;
+  index_t i_plane = static_cast<index_t>(blockIdx.x + offsetZ);
   it = i_plane % isizeT; // output frame/time
-  int d = i_plane / isizeT; // slice/feature
+  index_t d = i_plane / isizeT; // slice/feature
 
   // output frame/time range is fixed.
-  int ostartT = start_index(it, isizeT, osizeT);
-  int oendT = end_index(it, isizeT, osizeT);
+  index_t ostartT = start_index(it, isizeT, osizeT);
+  index_t oendT = end_index(it, isizeT, osizeT);
 
   // gradInput offset by slice/feature and frame/time.
   scalar_t *gradInput_dt = gradInput + i_plane*isizeH*isizeW;
@@ -185,25 +186,25 @@ __global__ void adaptiveaveragegradinput(
 
   // For all input pixels...
   for (ih = istartH; ih < iendH; ih += istepH) {
-    int ostartH = start_index(ih, isizeH, osizeH);
-    int oendH = end_index(ih, isizeH, osizeH);
+    index_t ostartH = start_index(ih, isizeH, osizeH);
+    index_t oendH = end_index(ih, isizeH, osizeH);
 
     for (iw = istartW; iw < iendW; iw += istepW) {
-      int ostartW = start_index(iw, isizeW, osizeW);
-      int oendW = end_index(iw, isizeW, osizeW);
+      index_t ostartW = start_index(iw, isizeW, osizeW);
+      index_t oendW = end_index(iw, isizeW, osizeW);
 
       // Compute the gradients from corresponding output pixels
       scalar_t *ptr_gradInput = gradInput_dt + ih*isizeW + iw;
       const scalar_t *ptr_gradOutput = gradOutput_dt;
 
       // for all relevant output pixels
-      int ot, oh, ow;
+      index_t ot, oh, ow;
       for (ot = ostartT; ot < oendT; ++ot) {
-        int kT = end_index(ot, osizeT, isizeT) - start_index(ot, osizeT, isizeT);
+        index_t kT = end_index(ot, osizeT, isizeT) - start_index(ot, osizeT, isizeT);
         for (oh = ostartH; oh < oendH; ++oh) {
-          int kH = end_index(oh, osizeH, isizeH) - start_index(oh, osizeH, isizeH);
+          index_t kH = end_index(oh, osizeH, isizeH) - start_index(oh, osizeH, isizeH);
           for (ow = ostartW; ow < oendW; ++ow) {
-            int kW = end_index(ow, osizeW, isizeW) - start_index(ow, osizeW, isizeW);
+            index_t kW = end_index(ow, osizeW, isizeW) - start_index(ow, osizeW, isizeW);
             const accscalar_t divide_factor = kW * kH * kT;
             accscalar_t grad_delta = static_cast<accscalar_t>(ptr_gradOutput[oh*osizeW + ow] / divide_factor);
             *ptr_gradInput += static_cast<scalar_t>(grad_delta);
@@ -215,19 +216,19 @@ __global__ void adaptiveaveragegradinput(
   }
 }
 
-template <typename scalar_t, typename accscalar_t>
+template <typename scalar_t, typename accscalar_t, typename index_t>
 void adaptiveaveragegradinput_loop(
     scalar_t *gradInput_data, const scalar_t *gradOutput_data,
     int64_t totalZ,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW) {
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW) {
   int64_t offsetZ = 0;
   dim3 threads(32, 8);
   // each H*W plane is processed by blocksH thread blocks
   int blocksH = std::max((int)(16L / totalZ), 1);
   while (totalZ > 0) {
     dim3 blocks(totalZ > 65535 ? 65535 : totalZ, blocksH);
-    adaptiveaveragegradinput<scalar_t, accscalar_t>
+    adaptiveaveragegradinput<scalar_t, accscalar_t, index_t>
       <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         gradInput_data, gradOutput_data,
         isizeT, isizeH, isizeW,
@@ -249,33 +250,33 @@ void adaptiveaveragegradinput_loop(
  *    (uses atomic add)
  *
  */
-template <typename scalar_t>
+template <typename scalar_t, typename index_t>
 __global__ void atomicadaptiveaveragegradinput(
     scalar_t *gradInput, const scalar_t *gradOutput,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW,
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW,
     int64_t offsetZ)
 {
   // iterators on output pixels
-  int ot, oh, ow;
+  index_t ot, oh, ow;
 
   // compute offsets based on thread/block ID
-  int ostartH = blockIdx.y * blockDim.y + threadIdx.y;
-  int oendH = osizeH;
-  int ostepH = gridDim.y * blockDim.y;
-  int ostartW = threadIdx.x;
-  int oendW = osizeW;
-  int ostepW = blockDim.x;
+  index_t ostartH = blockIdx.y * blockDim.y + threadIdx.y;
+  index_t oendH = osizeH;
+  index_t ostepH = gridDim.y * blockDim.y;
+  index_t ostartW = threadIdx.x;
+  index_t oendW = osizeW;
+  index_t ostepW = blockDim.x;
 
   // select output plane
-  int64_t o_plane = blockIdx.x + offsetZ;
+  index_t o_plane = static_cast<index_t>(blockIdx.x + offsetZ);
   ot = o_plane % osizeT; // output frame/time
-  int d = o_plane / osizeT; // output slice/feature
+  index_t d = o_plane / osizeT; // output slice/feature
 
   // input frame/time range is fixed.
-  int istartT = start_index(ot, osizeT, isizeT);
-  int iendT = end_index(ot, osizeT, isizeT);
-  int kT = iendT - istartT;
+  index_t istartT = start_index(ot, osizeT, isizeT);
+  index_t iendT = end_index(ot, osizeT, isizeT);
+  index_t kT = iendT - istartT;
 
   // gradInput offset by slice/feature and earliest relevant frame/time
   scalar_t *gradInput_nt = gradInput + (d*isizeT + istartT)*isizeH*isizeW;
@@ -284,21 +285,21 @@ __global__ void atomicadaptiveaveragegradinput(
 
   // For all output pixels...
   for (oh = ostartH; oh < oendH; oh += ostepH) {
-    int istartH = start_index(oh, osizeH, isizeH);
-    int iendH = end_index(oh, osizeH, isizeH);
-    int kH = iendH - istartH;
+    index_t istartH = start_index(oh, osizeH, isizeH);
+    index_t iendH = end_index(oh, osizeH, isizeH);
+    index_t kH = iendH - istartH;
 
     for (ow = ostartW; ow < oendW; ow += ostepW) {
-      int istartW = start_index(ow, osizeW, isizeW);
-      int iendW = end_index(ow, osizeW, isizeW);
-      int kW = iendW - istartW;
+      index_t istartW = start_index(ow, osizeW, isizeW);
+      index_t iendW = end_index(ow, osizeW, isizeW);
+      index_t kW = iendW - istartW;
 
       // Compute the gradients from corresponding input pixels
       scalar_t *ptr_gradInput = gradInput_nt + istartH*isizeW + istartW;
       const scalar_t *ptr_gradOutput = gradOutput_nt + oh*osizeW + ow;
       scalar_t grad_delta = *ptr_gradOutput / kT / kH / kW;
 
-      int it, ih, iw;
+      index_t it, ih, iw;
       for (it = 0; it < kT; ++it) {
         for (ih = 0; ih < kH; ++ih) {
           for (iw = 0; iw < kW; ++iw) {
@@ -311,18 +312,18 @@ __global__ void atomicadaptiveaveragegradinput(
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, typename index_t>
 void atomicadaptiveaveragegradinput_loop(
     scalar_t* gradInput_data, const scalar_t* gradOutput_data,
     int64_t totalZ,
-    int isizeT, int isizeH, int isizeW,
-    int osizeT, int osizeH, int osizeW) {
+    index_t isizeT, index_t isizeH, index_t isizeW,
+    index_t osizeT, index_t osizeH, index_t osizeW) {
   int64_t offsetZ = 0;
   dim3 threads(32, 8);
   int blocksH = std::max((int)(16L / totalZ), 1);
   while (totalZ > 0) {
     dim3 blocks(totalZ > 65535 ? 65535 : totalZ, blocksH);
-    atomicadaptiveaveragegradinput<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+    atomicadaptiveaveragegradinput<scalar_t, index_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
         gradInput_data, gradOutput_data,
         isizeT, isizeH, isizeW,
         osizeT, osizeH, osizeW,
@@ -414,12 +415,21 @@ void adaptive_avg_pool3d_out_cuda_template(
         const scalar_t* input_data = input.const_data_ptr<scalar_t>();
         scalar_t* output_data = output.mutable_data_ptr<scalar_t>();
 
-        adaptiveaveragepool_loop<scalar_t, accscalar_t>(
-            input_data, output_data,
-            totalZ,
-            isizeT, isizeH, isizeW,
-            osizeT, osizeH, osizeW,
-            sizeD, istrideB, istrideD, istrideT, istrideH, istrideW);
+        if (canUse32BitIndexMath(input) && canUse32BitIndexMath(output)) {
+          adaptiveaveragepool_loop<scalar_t, accscalar_t, int32_t>(
+              input_data, output_data,
+              totalZ,
+              isizeT, isizeH, isizeW,
+              osizeT, osizeH, osizeW,
+              sizeD, istrideB, istrideD, istrideT, istrideH, istrideW);
+        } else {
+          adaptiveaveragepool_loop<scalar_t, accscalar_t, int64_t>(
+              input_data, output_data,
+              totalZ,
+              isizeT, isizeH, isizeW,
+              osizeT, osizeH, osizeW,
+              sizeD, istrideB, istrideD, istrideT, istrideH, istrideW);
+        }
       });
 }
 
@@ -481,17 +491,28 @@ void adaptive_avg_pool3d_backward_out_cuda_template(
     totalZ = atomic ? sizeB * sizeD * osizeT : sizeB * sizeD * isizeT;
   }
 
+  const bool use32BitIndexMath = canUse32BitIndexMath(gradInput) &&
+      canUse32BitIndexMath(gradOutput);
+
   if (atomic) {
     AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16,
         input.scalar_type(), "adaptive_avg_pool3d_backward_cuda", [&] {
           scalar_t* gradInput_data = gradInput.mutable_data_ptr<scalar_t>();
           const scalar_t* gradOutput_data = gradOutput.const_data_ptr<scalar_t>();
 
-          atomicadaptiveaveragegradinput_loop(
-              gradInput_data, gradOutput_data,
-              totalZ,
-              isizeT, isizeH, isizeW,
-              osizeT, osizeH, osizeW);
+          if (use32BitIndexMath) {
+            atomicadaptiveaveragegradinput_loop<scalar_t, int32_t>(
+                gradInput_data, gradOutput_data,
+                totalZ,
+                isizeT, isizeH, isizeW,
+                osizeT, osizeH, osizeW);
+          } else {
+            atomicadaptiveaveragegradinput_loop<scalar_t, int64_t>(
+                gradInput_data, gradOutput_data,
+                totalZ,
+                isizeT, isizeH, isizeW,
+                osizeT, osizeH, osizeW);
+          }
         });
   } else {
     AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16,
@@ -501,11 +522,19 @@ void adaptive_avg_pool3d_backward_out_cuda_template(
           scalar_t* gradInput_data = gradInput.mutable_data_ptr<scalar_t>();
           const scalar_t* gradOutput_data = gradOutput.const_data_ptr<scalar_t>();
 
-          adaptiveaveragegradinput_loop<scalar_t, accscalar_t>(
-              gradInput_data, gradOutput_data,
-              totalZ,
-              isizeT, isizeH, isizeW,
-              osizeT, osizeH, osizeW);
+          if (use32BitIndexMath) {
+            adaptiveaveragegradinput_loop<scalar_t, accscalar_t, int32_t>(
+                gradInput_data, gradOutput_data,
+                totalZ,
+                isizeT, isizeH, isizeW,
+                osizeT, osizeH, osizeW);
+          } else {
+            adaptiveaveragegradinput_loop<scalar_t, accscalar_t, int64_t>(
+                gradInput_data, gradOutput_data,
+                totalZ,
+                isizeT, isizeH, isizeW,
+                osizeT, osizeH, osizeW);
+          }
         });
   }
 }

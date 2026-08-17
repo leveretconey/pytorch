@@ -500,6 +500,38 @@ class TestPoolingNNDeviceType(NNTestCase):
         self.assertTrue(ref_out.is_contiguous())
         self.assertEqual(out, ref_out)
 
+    @onlyCUDA
+    @largeTensorTest("10GB", device="cuda")
+    def test_adaptive_avg_pool3d_forward_large_index(self, device):
+        # The forward CUDA kernel must use 64-bit output indexing when H * W
+        # exceeds INT_MAX.
+        height = 46342
+        width = 46341
+        base = torch.ones((), dtype=torch.float32, device=device)
+        input = base.expand(1, 1, 1, 1)
+
+        output = F.adaptive_avg_pool3d(input, (1, height, width))
+        self.assertEqual(output.shape, (1, 1, height, width))
+        self.assertEqual(output[0, 0, 0, 0], base)
+        self.assertEqual(output[0, 0, height - 1, width - 1], base)
+
+    @onlyCUDA
+    @largeTensorTest("10GB", device="cuda")
+    def test_adaptive_avg_pool3d_backward_large_index(self, device):
+        # Regression test for https://github.com/pytorch/pytorch/issues/193096
+        # The backward CUDA kernel must use 64-bit indexing when H * W exceeds
+        # INT_MAX.  The expanded input keeps the forward allocation small while
+        # still requiring a large contiguous gradInput in backward.
+        height = 46342
+        width = 46341
+        base = torch.ones((), dtype=torch.float32, device=device, requires_grad=True)
+        input = base.expand(1, 1, height, width)
+
+        output = F.adaptive_avg_pool3d(input, (1, height, 1))
+        self.assertEqual(output.shape, (1, 1, height, 1))
+        output.sum().backward()
+        self.assertEqual(base.grad, torch.tensor(float(height), device=device))
+
     @onlyAccelerator
     def test_adaptive_avg_pooling_overflow(self, device):
         input = torch.randint(
